@@ -109,7 +109,7 @@ __global__ void xla_int_comparison(T* buffer_a, T* buffer_b,
       elem_b = static_cast<uint64_t>(buffer_b[idx]);
     }
     float rel_error =
-        fabs(elem_a - elem_b) / (fmax(fabs(elem_a), fabs(elem_b)) + 1);
+        fabsf(elem_a - elem_b) / (fmaxf(fabsf(elem_a), fabsf(elem_b)) + 1);
     if (rel_error > rel_error_threshold || isnan(rel_error)) {
       atomicAdd(mismatch_count, 1);
     }

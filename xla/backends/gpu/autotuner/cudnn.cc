@@ -303,6 +303,13 @@ GetConvolutionCustomCallConfigs(const HloCustomCallInstruction* instr,
       se::dnn::DataType output_type,
       GetDNNDataTypeFromPrimitiveType(gpu_conv_config.output_type));
   se::dnn::DnnSupport* dnn = stream_executor->AsDnn();
+  if (dnn == nullptr) {
+    // AsDnn() returns null when no DNN plugin (cuDNN) is linked into the
+    // application; calling GetAlgorithms below would dereference it.
+    return absl::FailedPreconditionError(
+        "DNN library (cuDNN) is not available; cannot enumerate convolution "
+        "algorithms.");
+  }
   auto allocator =
       std::make_unique<stream_executor::StreamExecutorAddressAllocator>(
           stream_executor);
