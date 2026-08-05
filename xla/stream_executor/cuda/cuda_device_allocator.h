@@ -40,8 +40,13 @@ class CudaDeviceAllocator : public MemoryAllocator {
     // Whether to enable peer access from all accessible devices.
     bool enable_peer_access = false;
 
-    // Whether to request POSIX_FILE_DESCRIPTOR handle type.
+    // Whether to request POSIX_FILE_DESCRIPTOR handle type. POSIX file
+    // descriptors do not exist on Windows, so the default is false there.
+#ifdef _WIN32
+    bool enable_posix_fd_handle = false;
+#else
     bool enable_posix_fd_handle = true;
+#endif
 
     // Whether to request FABRIC handle type.
     bool enable_fabric_handle = false;

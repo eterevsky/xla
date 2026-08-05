@@ -15,8 +15,6 @@ limitations under the License.
 
 #include "xla/stream_executor/cuda/cudnn_api_wrappers.h"
 
-#include <sys/resource.h>
-
 #include <string>
 
 #include "absl/status/status.h"

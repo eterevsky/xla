@@ -80,12 +80,16 @@ CUmemAllocationProp BuildVmmAllocationProp(
   properties.allocFlags.gpuDirectRDMACapable = options.enable_rdma ? 1 : 0;
 
   int handle_types = CU_MEM_HANDLE_TYPE_NONE;
+#ifndef _WIN32
+  // POSIX_FILE_DESCRIPTOR and FABRIC handle types do not exist on Windows;
+  // requesting them makes cuMemCreate fail with CUDA_ERROR_INVALID_VALUE.
   if (options.enable_posix_fd_handle) {
     handle_types |= CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
   }
   if (options.enable_fabric_handle) {
     handle_types |= CU_MEM_HANDLE_TYPE_FABRIC;
   }
+#endif
   properties.requestedHandleTypes =
       static_cast<CUmemAllocationHandleType>(handle_types);
   return properties;
@@ -96,7 +100,14 @@ absl::StatusOr<CudaDeviceAllocator::Options> QueryDeviceAllocatorOptions(
   ASSIGN_OR_RETURN(bool rdma, IsRdmaSupported(device));
   ASSIGN_OR_RETURN(bool fabric, IsFabricSupported(device));
 
+#ifdef _WIN32
+  // Windows has neither POSIX file descriptors nor fabric (IMEX) support;
+  // use CU_MEM_HANDLE_TYPE_NONE from the start.
+  fabric = false;
+  bool posix_fd = false;
+#else
   bool posix_fd = true;
+#endif
   size_t granularity = 0;
 
   auto try_query = [&]() -> absl::Status {
