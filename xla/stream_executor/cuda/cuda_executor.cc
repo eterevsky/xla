@@ -327,10 +327,10 @@ absl::StatusOr<int> GetDeviceAttribute(CUdevice_attribute attribute,
 absl::StatusOr<std::string> GetDeviceName(CUdevice device) {
   std::array<char, 64> chars;
   RETURN_IF_ERROR(
-      cuda::ToStatus(cuDeviceGetName(chars.begin(), chars.size() - 1, device),
+      cuda::ToStatus(cuDeviceGetName(chars.data(), chars.size() - 1, device),
                      "Failed to get device name"));
   chars[chars.size() - 1] = '\0';
-  return chars.begin();
+  return chars.data();
 }
 
 // Returns the compute capability for the device; i.e (3, 5).
