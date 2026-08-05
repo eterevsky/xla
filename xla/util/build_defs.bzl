@@ -39,8 +39,12 @@ def _run_protoc_impl(ctx):
 
     proto_descriptor_sets = _descriptor_set_list(ctx.attr.deps, ctx.file.descriptor_set)
 
+    # protoc splits the --descriptor_set_in list on the host's path-list
+    # separator: ';' on Windows, ':' elsewhere.
     descriptor_set_in = ("--descriptor_set_in=%s" %
-                         ":".join([file.path for file in proto_descriptor_sets]))
+                         ctx.configuration.host_path_separator.join(
+                             [file.path for file in proto_descriptor_sets],
+                         ))
 
     if len(ctx.outputs.outs) != 1:
         fail("Expected exactly one output")
@@ -79,7 +83,14 @@ def _run_protoc_impl(ctx):
             outputs = ctx.outputs.outs,
             inputs = [ctx.file.src] + proto_descriptor_sets,
             tools = [ctx.executable._tool],
-            command = " ".join([ctx.executable._tool.path] + protoc_args + redirect),
+            # Quote the protoc arguments: on Windows the descriptor set list
+            # is ';'-separated, which the shell would otherwise parse as a
+            # command separator.
+            command = " ".join(
+                [ctx.executable._tool.path] +
+                ["'%s'" % arg for arg in protoc_args] +
+                redirect,
+            ),
             mnemonic = "ProtoDataCompiler",
             use_default_shell_env = False,
         )

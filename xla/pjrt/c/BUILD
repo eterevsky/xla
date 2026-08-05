@@ -742,10 +742,13 @@ xla_cc_binary(
     additional_linker_inputs = [
         ":pjrt_c_api_gpu_version_script.lds",
     ],
-    linkopts = [
-        "-Wl,--version-script,$(location :pjrt_c_api_gpu_version_script.lds)",
-        "-Wl,--no-undefined",
-    ],
+    linkopts = select({
+        "//xla/tsl:windows": [],
+        "//conditions:default": [
+            "-Wl,--version-script,$(location :pjrt_c_api_gpu_version_script.lds)",
+            "-Wl,--no-undefined",
+        ],
+    }),
     linkshared = True,
     tags = [
         "no_mac",  # No GPU on mac.
