@@ -36,6 +36,9 @@ limitations under the License.
 #include <dlfcn.h>
 
 #include "xla/tsl/platform/status_macros.h"
+#else
+#include "tsl/platform/load_library.h"
+#include "xla/tsl/platform/status_macros.h"
 #endif
 
 namespace pjrt {
@@ -101,8 +104,17 @@ typedef const PJRT_Api* (*PjrtApiInitFn)();
 absl::StatusOr<const PJRT_Api*> LoadPjrtPlugin(absl::string_view device_type,
                                                absl::string_view library_path) {
 #ifdef PLATFORM_WINDOWS
-  return absl::UnimplementedError(
-      "LoadPjrtPlugin is not implemented on windows yet.");
+  void* library = nullptr;
+  RETURN_IF_ERROR(tsl::internal::LoadDynamicLibrary(
+      std::string(library_path).c_str(), &library));
+  PjrtApiInitFn init_fn = nullptr;
+  RETURN_IF_ERROR(tsl::internal::GetSymbolFromLibrary(
+      library, "GetPjrtApi", reinterpret_cast<void**>(&init_fn)));
+  LOG(INFO) << "GetPjrtApi was found for " << device_type << " at "
+            << library_path;
+  const PJRT_Api* api = init_fn();
+  RETURN_IF_ERROR(SetPjrtApi(device_type, api));
+  return api;
 #else
   void* library = dlopen(library_path.data(), RTLD_LAZY);
   if (library == nullptr) {
