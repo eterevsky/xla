@@ -82,8 +82,17 @@ absl::Status ToStatus(cudnnStatus_t status, absl::string_view detail) {
 // cudnn_plugin. This is mainly relevant for unit tests that use the CUDA
 // executor which depends on this wrapper but should not introduce a dependency
 // on cudnn.
+//
+// On Windows (PE/COFF) weak externals never resolve against import libraries,
+// so the weak-symbol probe would always see null even though the GPU plugin
+// links cuDNN. Declare the symbol strongly there; the plugin always links the
+// cuDNN import library on Windows.
+#ifdef _WIN32
+extern "C" cudnnStatus_t cudnnGetProperty(libraryPropertyType type, int* value);
+#else
 extern "C" [[gnu::weak]] cudnnStatus_t cudnnGetProperty(
     libraryPropertyType type, int* value);
+#endif
 
 static libraryPropertyType ToLibraryPropertyType(CudnnProperty type) {
   switch (type) {
@@ -97,9 +106,13 @@ static libraryPropertyType ToLibraryPropertyType(CudnnProperty type) {
 }
 
 absl::StatusOr<int> GetCudnnProperty(CudnnProperty type) {
+#ifndef _WIN32
+  // With the strong declaration on Windows this check would be tautological
+  // (the address of a linked function is never null).
   if (!cudnnGetProperty) {
     return absl::NotFoundError("cuDNN is not linked into the application.");
   }
+#endif
   int value{};
   RETURN_IF_ERROR(
       ToStatus(cudnnGetProperty(ToLibraryPropertyType(type), &value)));
