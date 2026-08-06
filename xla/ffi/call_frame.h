@@ -67,6 +67,15 @@ class CallFrameBuilder {
       Insert(std::move(name), Attribute{std::string(attr)});
     }
 
+    // An exact-match overload for bool is required on MSVC-compatible
+    // compilers (MSVC, clang-cl): there the boolean literals `true`/`false`
+    // convert to a null pointer via a legacy extension, so
+    // `Insert(name, false)` would otherwise select the `const char*`
+    // overload above with a null pointer and crash in `strlen`.
+    void Insert(std::string name, bool attr) {
+      Insert(std::move(name), Attribute{Scalar{attr}});
+    }
+
     AttributesMap Build();
 
    private:
