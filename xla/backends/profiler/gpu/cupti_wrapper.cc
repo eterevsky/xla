@@ -29,6 +29,12 @@ limitations under the License.
 #include "third_party/gpus/cuda/include/cuda.h"
 #include "xla/backends/profiler/gpu/cupti_interface.h"
 
+#ifdef _WIN32
+#include <windows.h>
+
+#include <psapi.h>
+#endif
+
 #if CUPTI_API_VERSION >= 24
 #include "third_party/gpus/cuda/extras/CUPTI/include/cupti_pmsampling.h"
 #include "third_party/gpus/cuda/extras/CUPTI/include/cupti_profiler_host.h"
@@ -102,6 +108,77 @@ constexpr int kCuptiErrorMultipleSubscribersNotSupported = 39;
 
 }  // namespace
 
+#ifdef _WIN32
+// On PE/COFF, [[gnu::weak]] externals never resolve against import libraries:
+// the linker leaves them null even when a linked DLL exports the symbol.
+// Instead, resolve the optional CUPTI entry points at runtime from whichever
+// loaded module exports the CUPTI API. This preserves the semantics of the
+// ELF weak-symbol probes below: a symbol missing from the loaded CUPTI simply
+// stays null and the wrapper reports CUPTI_ERROR_NOT_SUPPORTED.
+namespace {
+
+HMODULE GetCuptiModule() {
+  static HMODULE cupti_module = [] {
+    HMODULE modules[1024];
+    DWORD bytes_needed = 0;
+    if (!EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules),
+                            &bytes_needed)) {
+      return static_cast<HMODULE>(nullptr);
+    }
+    DWORD count = bytes_needed / sizeof(HMODULE);
+    if (count > 1024) count = 1024;
+    for (DWORD i = 0; i < count; ++i) {
+      // Identify the CUPTI DLL by a symbol every CUPTI version exports.
+      if (GetProcAddress(modules[i], "cuptiGetResultString") != nullptr) {
+        return modules[i];
+      }
+    }
+    return static_cast<HMODULE>(nullptr);
+  }();
+  return cupti_module;
+}
+
+template <typename FnPtr>
+FnPtr LoadOptionalCuptiSymbol(const char* name) {
+  HMODULE cupti_module = GetCuptiModule();
+  if (cupti_module == nullptr) {
+    return nullptr;
+  }
+  return reinterpret_cast<FnPtr>(
+      reinterpret_cast<void*>(GetProcAddress(cupti_module, name)));
+}
+
+}  // namespace
+
+// Declares `name` as a function pointer resolved from the CUPTI module at
+// plugin load time; null when the loaded CUPTI does not export it. Call sites
+// are identical to the weak-symbol declarations used on ELF.
+#define XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(name, ...)  \
+  static CUptiResult (*const name)(__VA_ARGS__) =     \
+      LoadOptionalCuptiSymbol<CUptiResult (*)(__VA_ARGS__)>(#name);
+
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiActivityRegisterCallbacks_v2,
+                                  CUpti_SubscriberHandle,
+                                  CuptiBuffersCallbackRequestFuncV2Abi,
+                                  CuptiBuffersCallbackCompleteFuncV2Abi)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiActivityEnable_v2,
+                                  CUpti_SubscriberHandle, CUpti_ActivityKind,
+                                  CuptiActivityConfigAbi*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiActivityDisable_v2,
+                                  CUpti_SubscriberHandle, CUpti_ActivityKind,
+                                  CuptiActivityConfigAbi*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiActivityGetNextRecord_v2,
+                                  CUpti_SubscriberHandle, uint8_t*, size_t,
+                                  CUpti_Activity**)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiActivitySetAttribute_v2,
+                                  CUpti_SubscriberHandle,
+                                  CUpti_ActivityAttribute, size_t*, void*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiGetTimestamp_v2, CUpti_SubscriberHandle,
+                                  uint64_t*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiSubscribe_v2, CUpti_SubscriberHandle*,
+                                  CUpti_CallbackFunc, void*,
+                                  CuptiSubscriberParamsAbi*)
+#else
 extern "C" {
 [[gnu::weak]] CUptiResult cuptiActivityRegisterCallbacks_v2(
     CUpti_SubscriberHandle subscriber,
@@ -126,6 +203,7 @@ extern "C" {
                                             void* userdata,
                                             CuptiSubscriberParamsAbi* params);
 }  // extern "C"
+#endif  // _WIN32
 
 CUptiResult CuptiWrapper::ActivityDisable(CUpti_ActivityKind kind) {
   return cuptiActivityDisable(kind);
@@ -363,10 +441,14 @@ CUptiResult CuptiWrapper::GetStreamIdEx(CUcontext context, CUstream stream,
   return cuptiGetStreamIdEx(context, stream, per_thread_stream, stream_id);
 }
 
+#ifdef _WIN32
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiActivityEnableHWTrace, uint8_t)
+#else
 extern "C" {
 // Prototype for cuptiActivityEnableHWTrace if headers are not present.
 [[gnu::weak]] CUptiResult cuptiActivityEnableHWTrace(uint8_t enable);
 }  // extern "C"
+#endif  // _WIN32
 
 CUptiResult CuptiWrapper::ActivityEnableHWTrace(bool enable) {
   return (cuptiActivityEnableHWTrace == nullptr)
@@ -375,6 +457,109 @@ CUptiResult CuptiWrapper::ActivityEnableHWTrace(bool enable) {
 }
 
 // Prototypes for PM sampling and profiler host APIs if headers are not present
+#ifdef _WIN32
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerHostInitialize,
+                                  CUpti_Profiler_Host_Initialize_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerHostDeinitialize,
+                                  CUpti_Profiler_Host_Deinitialize_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerHostGetSupportedChips,
+                                  CUpti_Profiler_Host_GetSupportedChips_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerHostGetBaseMetrics,
+                                  CUpti_Profiler_Host_GetBaseMetrics_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerHostGetSubMetrics,
+                                  CUpti_Profiler_Host_GetSubMetrics_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(
+    cuptiProfilerHostGetMetricProperties,
+    CUpti_Profiler_Host_GetMetricProperties_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerHostGetRangeName,
+                                  CUpti_Profiler_Host_GetRangeName_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(
+    cuptiProfilerHostEvaluateToGpuValues,
+    CUpti_Profiler_Host_EvaluateToGpuValues_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerHostConfigAddMetrics,
+                                  CUpti_Profiler_Host_ConfigAddMetrics_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(
+    cuptiProfilerHostGetConfigImageSize,
+    CUpti_Profiler_Host_GetConfigImageSize_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerHostGetConfigImage,
+                                  CUpti_Profiler_Host_GetConfigImage_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerHostGetNumOfPasses,
+                                  CUpti_Profiler_Host_GetNumOfPasses_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(
+    cuptiProfilerHostGetMaxNumHardwareMetricsPerPass,
+    CUpti_Profiler_Host_GetMaxNumHardwareMetricsPerPass_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerInitialize,
+                                  CUpti_Profiler_Initialize_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerDeInitialize,
+                                  CUpti_Profiler_DeInitialize_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(
+    cuptiProfilerCounterDataImageCalculateSize,
+    CUpti_Profiler_CounterDataImage_CalculateSize_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(
+    cuptiProfilerCounterDataImageInitialize,
+    CUpti_Profiler_CounterDataImage_Initialize_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(
+    cuptiProfilerCounterDataImageCalculateScratchBufferSize,
+    CUpti_Profiler_CounterDataImage_CalculateScratchBufferSize_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(
+    cuptiProfilerCounterDataImageInitializeScratchBuffer,
+    CUpti_Profiler_CounterDataImage_InitializeScratchBuffer_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerBeginSession,
+                                  CUpti_Profiler_BeginSession_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerEndSession,
+                                  CUpti_Profiler_EndSession_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerSetConfig,
+                                  CUpti_Profiler_SetConfig_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerBeginPass,
+                                  CUpti_Profiler_BeginPass_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerEndPass,
+                                  CUpti_Profiler_EndPass_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerEnableProfiling,
+                                  CUpti_Profiler_EnableProfiling_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerDisableProfiling,
+                                  CUpti_Profiler_DisableProfiling_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerIsPassCollected,
+                                  CUpti_Profiler_IsPassCollected_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerFlushCounterData,
+                                  CUpti_Profiler_FlushCounterData_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerPushRange,
+                                  CUpti_Profiler_PushRange_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerPopRange,
+                                  CUpti_Profiler_PopRange_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(
+    cuptiProfilerGetCounterAvailability,
+    CUpti_Profiler_GetCounterAvailability_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerDeviceSupported,
+                                  CUpti_Profiler_DeviceSupported_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiProfilerUnsetConfig,
+                                  CUpti_Profiler_UnsetConfig_Params*)
+
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiPmSamplingSetConfig,
+                                  CUpti_PmSampling_SetConfig_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiPmSamplingEnable,
+                                  CUpti_PmSampling_Enable_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiPmSamplingDisable,
+                                  CUpti_PmSampling_Disable_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiPmSamplingStart,
+                                  CUpti_PmSampling_Start_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiPmSamplingStop,
+                                  CUpti_PmSampling_Stop_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiPmSamplingDecodeData,
+                                  CUpti_PmSampling_DecodeData_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(
+    cuptiPmSamplingGetCounterAvailability,
+    CUpti_PmSampling_GetCounterAvailability_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiPmSamplingGetCounterDataSize,
+                                  CUpti_PmSampling_GetCounterDataSize_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(
+    cuptiPmSamplingCounterDataImageInitialize,
+    CUpti_PmSampling_CounterDataImage_Initialize_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(cuptiPmSamplingGetCounterDataInfo,
+                                  CUpti_PmSampling_GetCounterDataInfo_Params*)
+XLA_DECLARE_OPTIONAL_CUPTI_SYMBOL(
+    cuptiPmSamplingCounterDataGetSampleInfo,
+    CUpti_PmSampling_CounterData_GetSampleInfo_Params*)
+#else
 extern "C" {
 [[gnu::weak]] CUptiResult cuptiProfilerHostInitialize(
     CUpti_Profiler_Host_Initialize_Params* params);
@@ -467,6 +652,7 @@ cuptiProfilerCounterDataImageCalculateScratchBufferSize(
 [[gnu::weak]] CUptiResult cuptiPmSamplingCounterDataGetSampleInfo(
     CUpti_PmSampling_CounterData_GetSampleInfo_Params* params);
 }
+#endif  // _WIN32
 
 // Profiler Host APIs
 CUptiResult CuptiWrapper::ProfilerHostInitialize(
