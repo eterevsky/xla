@@ -95,6 +95,7 @@ limitations under the License.
 #include "xla/backends/gpu/runtime/host_to_device_copy_thunk.h"
 #include "xla/backends/gpu/runtime/infeed_thunk.h"
 #include "xla/backends/gpu/runtime/legacy_custom_call_thunk.h"
+#include "xla/backends/gpu/runtime/memset_thunk.h"
 #include "xla/backends/gpu/runtime/norm_thunk.h"
 #include "xla/backends/gpu/runtime/outfeed_thunk.h"
 #include "xla/backends/gpu/runtime/ragged_all_to_all_thunk.h"
@@ -1918,8 +1919,19 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitCollectivePermute(
 
     ASSIGN_OR_RETURN(BufferAllocation::Slice source_slice,
                      GetAllocationSliceForHlo(operand));
-    if (CollectivePermuteThunk::IsDegenerate(instr, replica_count,
-                                             partition_count)) {
+    if (instr->source_target_pairs().empty()) {
+      // A collective permute with no source-target pairs receives no data on
+      // any participant, which the collective runtimes implement by zeroing
+      // the output (see RunCollectivePermute). Emit the memzero directly and
+      // skip the collective thunk; besides avoiding a pointless communicator
+      // acquisition, this keeps such programs (e.g. jax's ppermute gradient
+      // on a single device) working on builds without collectives support.
+      thunks.push_back(std::make_unique<MemzeroThunk>(
+          Thunk::ThunkInfo::WithProfileAnnotation(
+              async_start, ir_emitter_context_->GetNextThunkId()),
+          ShapedSlice{result_slice, result_buffer_shape}));
+    } else if (CollectivePermuteThunk::IsDegenerate(instr, replica_count,
+                                                    partition_count)) {
       // For a degenerate collective permute, just generate a copy
       // thunk.
       thunks.push_back(std::make_unique<DeviceToDeviceCopyThunk>(
@@ -1939,7 +1951,8 @@ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitCollectivePermute(
       buffers.push_back(buffer);
     }
   }
-  if (!CollectivePermuteThunk::IsDegenerate(instr, replica_count,
+  if (!instr->source_target_pairs().empty() &&
+      !CollectivePermuteThunk::IsDegenerate(instr, replica_count,
                                             partition_count)) {
     thunks.push_back(std::make_unique<CollectivePermuteThunk>(
         Thunk::ThunkInfo::WithProfileAnnotation(
