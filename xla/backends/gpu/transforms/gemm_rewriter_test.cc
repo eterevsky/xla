@@ -645,6 +645,93 @@ ENTRY test {
 )");
 }
 
+// cuBLASLt computes epilogue(alpha * (A @ B) + beta * C), so the vector bias
+// added by the BIAS epilogue is not scaled by alpha. A scalar multiplier
+// applied to the result of the bias add must therefore not be folded into
+// alpha: that computes alpha * (A @ B) + bias instead of the requested
+// alpha * (A @ B + bias).
+TEST_F(CublasLtGemmRewriteTest, VectorBiasWithAlphaScale) {
+  const char* hlo_text = R"(
+HloModule test
+
+ENTRY test {
+  x = f32[2,3] parameter(0)
+  y = f32[3,4] parameter(1)
+  z = f32[4] parameter(2)
+  dot_a = f32[2,4] dot(x, y), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  z_bcast = f32[2,4] broadcast(z), dimensions={1}
+  add = f32[2,4] add(dot_a, z_bcast)
+  alpha = f32[] constant(0.1)
+  alpha_bcast = f32[2,4] broadcast(alpha), dimensions={}
+  ROOT out = f32[2,4] multiply(alpha_bcast, add)
+}
+)";
+
+  EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec{1e-5, 1e-5}));
+  MatchOptimizedHlo(hlo_text,
+                    R"(
+; CHECK-LABEL: ENTRY %test
+; CHECK-DAG:     [[P0:%[^ ]+]] = f32[2,3]{1,0} parameter(0)
+; CHECK-DAG:     [[P1:%[^ ]+]] = f32[3,4]{1,0} parameter(1)
+; CHECK-DAG:     [[P2:%[^ ]+]] = f32[4]{0} parameter(2)
+; CHECK:         [[GEMM:%[^ ]+]] = (f32[2,4]{1,0}, s8[{{[0-9]+}}]{0}) custom-call([[P0]], [[P1]], [[P2]]),
+; CHECK:           custom_call_target="__cublas$lt$matmul",
+; CHECK:           backend_config={
+; CHECK-DAG:         "alpha_real":1
+; CHECK-DAG:         "beta":0
+; CHECK-DAG:         "epilogue":"BIAS"
+; CHECK:           }
+; CHECK:         [[GTE:%[^ ]+]] = f32[2,4]{1,0} get-tuple-element([[GEMM]]), index=0
+; CHECK:         ROOT [[OUT:%[^ ]+]] = f32[2,4]{1,0} fusion([[GTE]]), kind=kLoop
+)");
+}
+
+// End-to-end form of the same miscompilation: (x @ w.T + b) / 30. The
+// algebraic simplifier turns the division by a constant into a multiplication
+// by its reciprocal, which then reaches the gemm rewriter as
+// multiply(<gemm with BIAS epilogue>, broadcast(1/30)).
+TEST_F(CublasLtGemmRewriteTest, VectorBiasThenDivideByConstant) {
+  const char* hlo_text = R"(
+HloModule test
+
+ENTRY test {
+  x = f32[16,32] parameter(0)
+  w = f32[32,32] parameter(1)
+  b = f32[32] parameter(2)
+  dot_a = f32[16,32] dot(x, w), lhs_contracting_dims={1}, rhs_contracting_dims={1}
+  b_bcast = f32[16,32] broadcast(b), dimensions={1}
+  add = f32[16,32] add(dot_a, b_bcast)
+  k = f32[] constant(30)
+  k_bcast = f32[16,32] broadcast(k), dimensions={}
+  ROOT out = f32[16,32] divide(add, k_bcast)
+}
+
+)";
+
+  EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec{1e-5, 1e-5}));
+}
+
+TEST_F(CublasLtGemmRewriteTest, BF16VectorBiasThenDivideByConstant) {
+  const char* hlo_text = R"(
+HloModule test
+
+ENTRY test {
+  x = bf16[16,32] parameter(0)
+  w = bf16[32,32] parameter(1)
+  b = bf16[32] parameter(2)
+  dot_a = bf16[16,32] dot(x, w), lhs_contracting_dims={1}, rhs_contracting_dims={1}
+  b_bcast = bf16[16,32] broadcast(b), dimensions={1}
+  add = bf16[16,32] add(dot_a, b_bcast)
+  k = bf16[] constant(30)
+  k_bcast = bf16[16,32] broadcast(k), dimensions={}
+  ROOT out = bf16[16,32] divide(add, k_bcast)
+}
+
+)";
+
+  EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec{3e-3, 1e-3}));
+}
+
 TEST_F(CublasLtGemmRewriteTest, BatchedVectorBias) {
   const char* hlo_text = R"(
 HloModule test
